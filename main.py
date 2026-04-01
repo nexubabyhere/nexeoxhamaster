@@ -2,7 +2,7 @@
 """
 NEXEO PREMIUM - Ultimate Media Downloader with Dark/Light Mode
 Advanced UI/UX with premium loading animations
-Deployment ready for Vercel
+Deployment ready for Vercel with Proxy Support
 Run: python nexeo.py
 """
 
@@ -13,9 +13,11 @@ import time
 import logging
 import re
 import os
-from flask import Flask, render_template_string, request, jsonify
+from flask import Flask, render_template_string, request, jsonify, send_file
 from datetime import datetime
 from functools import wraps
+import io
+from urllib.parse import urlparse
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'nexeo-premium-2026')
@@ -24,201 +26,209 @@ app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# API Configuration - Use environment variable for security
-API_URL = "https://api.easydownloader.app/api-extract/"
+# API Configuration - Multiple endpoints for fallback
+API_URLS = [
+    "https://api.easydownloader.app/api-extract/",
+    "https://easydownloader.app/api-extract/",
+    "https://api.savetube.me/api/extract"
+]
+
 API_KEY = os.environ.get('EASY_DOWNLOADER_API_KEY', '177p96593i9x5ase4.eivdoidjvsioiui-hNn?_oreesae&_eimrfra&_apinln')
 
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36',
-    'Accept': 'application/json, text/plain, */*',
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Content-Type': 'application/json',
-    'Origin': 'https://easydownloader.app',
-    'Referer': 'https://easydownloader.app/',
-    'Sec-Ch-Ua': '"Chromium";v="146", "Not-A.Brand";v="24"',
-    'Sec-Ch-Ua-Mobile': '?0',
-    'Sec-Ch-Ua-Platform': '"Windows"',
-    'Sec-Fetch-Dest': 'empty',
-    'Sec-Fetch-Mode': 'cors',
-    'Sec-Fetch-Site': 'same-site',
-}
+# Different user agents to avoid blocking
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
+]
+
+def get_random_headers():
+    """Get random headers to avoid blocking"""
+    return {
+        'User-Agent': USER_AGENTS[int(time.time()) % len(USER_AGENTS)],
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Content-Type': 'application/json',
+        'Origin': 'https://easydownloader.app',
+        'Referer': 'https://easydownloader.app/',
+        'Sec-Ch-Ua': '"Chromium";v="146", "Not-A.Brand";v="24"',
+        'Sec-Ch-Ua-Mobile': '?0',
+        'Sec-Ch-Ua-Platform': '"Windows"',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-site',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache'
+    }
 
 def extract_all_media(video_url, pagination=False):
-    """Extract all media types with robust error handling"""
-    payload = {
-        "video_url": video_url,
-        "pagination": pagination,
-        "key": API_KEY
-    }
+    """Extract all media types with multiple API fallback"""
     
-    # Retry logic for Vercel
-    max_retries = 3
-    retry_delay = 2
-    
-    for attempt in range(max_retries):
-        try:
-            logger.info(f"Extracting media from: {video_url[:80]}... (Attempt {attempt + 1})")
-            
-            response = requests.post(API_URL, json=payload, headers=HEADERS, timeout=45)
-            
-            # Log response details for debugging
-            logger.info(f"Status Code: {response.status_code}")
-            logger.info(f"Response Headers: {dict(response.headers)}")
-            
-            # Check for HTTP errors
-            if response.status_code != 200:
-                error_msg = f"HTTP {response.status_code}"
-                try:
-                    error_data = response.json()
-                    error_msg += f": {error_data.get('msg', error_data.get('error', response.text[:200]))}"
-                except:
-                    error_msg += f": {response.text[:200]}"
-                
-                if attempt < max_retries - 1:
-                    logger.warning(f"Attempt {attempt + 1} failed: {error_msg}. Retrying...")
-                    time.sleep(retry_delay)
-                    continue
-                else:
-                    return {'success': False, 'error': error_msg}
-            
-            # Parse JSON response
+    # Try multiple API endpoints
+    for api_index, API_URL in enumerate(API_URLS):
+        payload = {
+            "video_url": video_url,
+            "pagination": pagination,
+            "key": API_KEY
+        }
+        
+        # Retry logic for each API
+        max_retries = 2
+        retry_delay = 2
+        
+        for attempt in range(max_retries):
             try:
-                data = response.json()
-            except json.JSONDecodeError as e:
-                if attempt < max_retries - 1:
-                    logger.warning(f"JSON decode error on attempt {attempt + 1}: {e}")
+                headers = get_random_headers()
+                logger.info(f"Trying API {api_index + 1}/{len(API_URLS)} - Attempt {attempt + 1}: {API_URL}")
+                
+                response = requests.post(API_URL, json=payload, headers=headers, timeout=45)
+                
+                logger.info(f"Status Code: {response.status_code}")
+                
+                if response.status_code == 200:
+                    try:
+                        data = response.json()
+                        logger.info(f"API Response Keys: {list(data.keys())}")
+                        
+                        if data.get('status') == 'success':
+                            # Process successful response
+                            images = []
+                            videos = []
+                            audio = []
+                            video_title = "Media"
+                            thumbnail = None
+                            duration = None
+                            
+                            if 'final_urls' in data and data['final_urls']:
+                                video_data = data['final_urls'][0]
+                                video_title = video_data.get('title', 'Media')
+                                thumbnail = video_data.get('thumb')
+                                
+                                if 'duration' in video_data:
+                                    duration = video_data.get('duration')
+                                
+                                if thumbnail:
+                                    images.append({
+                                        'type': 'thumbnail',
+                                        'url': thumbnail,
+                                        'quality': 'HD Thumbnail',
+                                        'size': None,
+                                        'ext': 'webp'
+                                    })
+                                
+                                if 'links' in video_data:
+                                    for link in video_data['links']:
+                                        link_url = link.get('link_url')
+                                        file_quality = link.get('file_quality', 'Unknown')
+                                        file_type = link.get('file_type', 'mp4')
+                                        file_group = link.get('file_quality_group', 'video')
+                                        file_size = link.get('file_size')
+                                        
+                                        if link_url:
+                                            media_item = {
+                                                'quality': file_quality,
+                                                'url': link_url,
+                                                'size': file_size,
+                                                'ext': file_type,
+                                                'group': file_group
+                                            }
+                                            
+                                            if file_group == 'video':
+                                                videos.append(media_item)
+                                            elif file_group == 'audio':
+                                                audio.append(media_item)
+                                            else:
+                                                videos.append(media_item)
+                            
+                            # Remove duplicates
+                            unique_videos = []
+                            seen_urls = set()
+                            for vid in videos:
+                                if vid['url'] not in seen_urls:
+                                    seen_urls.add(vid['url'])
+                                    unique_videos.append(vid)
+                            
+                            # Sort videos by quality
+                            def get_quality_number(q):
+                                if '1080' in q or '1920x1080' in q:
+                                    return 1080
+                                elif '720' in q or '1280x720' in q:
+                                    return 720
+                                elif '480' in q or '854x480' in q:
+                                    return 480
+                                elif '360' in q or '640x360' in q:
+                                    return 360
+                                elif '240' in q or '426x240' in q:
+                                    return 240
+                                elif '144' in q or '256x144' in q:
+                                    return 144
+                                return 0
+                            
+                            unique_videos.sort(key=lambda x: get_quality_number(x['quality']), reverse=True)
+                            audio.sort(key=lambda x: x['quality'])
+                            
+                            return {
+                                'success': True,
+                                'title': video_title,
+                                'thumbnail': thumbnail,
+                                'duration': duration,
+                                'images': images,
+                                'videos': unique_videos,
+                                'audio': audio,
+                                'total_videos': len(unique_videos),
+                                'total_audio': len(audio),
+                                'timestamp': datetime.now().isoformat(),
+                                'api_used': API_URL
+                            }
+                        else:
+                            error_msg = data.get('msg', 'API returned error status')
+                            logger.warning(f"API error: {error_msg}")
+                            if attempt == max_retries - 1:
+                                continue
+                            time.sleep(retry_delay)
+                            continue
+                            
+                    except json.JSONDecodeError as e:
+                        logger.error(f"JSON decode error: {e}, Response: {response.text[:200]}")
+                        if attempt == max_retries - 1:
+                            continue
+                        time.sleep(retry_delay)
+                        continue
+                else:
+                    logger.warning(f"HTTP {response.status_code} from {API_URL}")
+                    if attempt == max_retries - 1:
+                        continue
                     time.sleep(retry_delay)
                     continue
-                else:
-                    return {
-                        'success': False,
-                        'error': f'Invalid JSON response from API. Response: {response.text[:200]}'
-                    }
-            
-            # Check API status
-            if data.get('status') != 'success':
-                error_msg = data.get('msg', data.get('error', 'API returned error status'))
-                return {'success': False, 'error': error_msg}
-            
-            # Process successful response
-            images = []
-            videos = []
-            audio = []
-            video_title = "Media"
-            thumbnail = None
-            duration = None
-            
-            if 'final_urls' in data and data['final_urls']:
-                video_data = data['final_urls'][0]
-                video_title = video_data.get('title', 'Media')
-                thumbnail = video_data.get('thumb')
-                
-                # Try to extract duration if available
-                if 'duration' in video_data:
-                    duration = video_data.get('duration')
-                
-                if thumbnail:
-                    images.append({
-                        'type': 'thumbnail',
-                        'url': thumbnail,
-                        'quality': 'HD Thumbnail',
-                        'size': None,
-                        'ext': 'webp'
-                    })
-                
-                if 'links' in video_data:
-                    for link in video_data['links']:
-                        link_url = link.get('link_url')
-                        file_quality = link.get('file_quality', 'Unknown')
-                        file_type = link.get('file_type', 'mp4')
-                        file_group = link.get('file_quality_group', 'video')
-                        file_size = link.get('file_size')
-                        
-                        if link_url:
-                            media_item = {
-                                'quality': file_quality,
-                                'url': link_url,
-                                'size': file_size,
-                                'ext': file_type,
-                                'group': file_group
-                            }
-                            
-                            if file_group == 'video':
-                                videos.append(media_item)
-                            elif file_group == 'audio':
-                                audio.append(media_item)
-                            else:
-                                videos.append(media_item)
-            
-            # Remove duplicates
-            unique_videos = []
-            seen_urls = set()
-            for vid in videos:
-                if vid['url'] not in seen_urls:
-                    seen_urls.add(vid['url'])
-                    unique_videos.append(vid)
-            
-            # Sort videos by quality
-            def get_quality_number(q):
-                if '1080' in q or '1920x1080' in q:
-                    return 1080
-                elif '720' in q or '1280x720' in q:
-                    return 720
-                elif '480' in q or '854x480' in q:
-                    return 480
-                elif '360' in q or '640x360' in q:
-                    return 360
-                elif '240' in q or '426x240' in q:
-                    return 240
-                elif '144' in q or '256x144' in q:
-                    return 144
-                return 0
-            
-            unique_videos.sort(key=lambda x: get_quality_number(x['quality']), reverse=True)
-            audio.sort(key=lambda x: x['quality'])
-            
-            return {
-                'success': True,
-                'title': video_title,
-                'thumbnail': thumbnail,
-                'duration': duration,
-                'images': images,
-                'videos': unique_videos,
-                'audio': audio,
-                'total_videos': len(unique_videos),
-                'total_audio': len(audio),
-                'timestamp': datetime.now().isoformat()
-            }
-            
-        except requests.exceptions.Timeout:
-            if attempt < max_retries - 1:
-                logger.warning(f"Timeout on attempt {attempt + 1}. Retrying...")
+                    
+            except requests.exceptions.Timeout:
+                logger.warning(f"Timeout on attempt {attempt + 1}")
+                if attempt == max_retries - 1:
+                    continue
                 time.sleep(retry_delay)
-                continue
-            else:
-                return {'success': False, 'error': 'Request timeout. Please try again.'}
                 
-        except requests.exceptions.ConnectionError:
-            if attempt < max_retries - 1:
-                logger.warning(f"Connection error on attempt {attempt + 1}. Retrying...")
+            except requests.exceptions.ConnectionError:
+                logger.warning(f"Connection error on attempt {attempt + 1}")
+                if attempt == max_retries - 1:
+                    continue
                 time.sleep(retry_delay)
-                continue
-            else:
-                return {'success': False, 'error': 'Connection error. Check your internet.'}
                 
-        except Exception as e:
-            logger.error(f"Extraction error: {str(e)}")
-            if attempt < max_retries - 1:
-                logger.warning(f"Error on attempt {attempt + 1}. Retrying...")
+            except Exception as e:
+                logger.error(f"Extraction error: {str(e)}")
+                if attempt == max_retries - 1:
+                    continue
                 time.sleep(retry_delay)
-                continue
-            else:
-                return {'success': False, 'error': f'Error: {str(e)}'}
     
-    return {'success': False, 'error': 'Max retries exceeded'}
+    # If all APIs fail
+    return {
+        'success': False,
+        'error': 'Unable to extract media. Please check the URL or try again later.',
+        'details': 'All API endpoints failed'
+    }
 
-# Advanced HTML Template with Dark/Light Mode
+# Advanced HTML Template with Enhanced Features
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -231,7 +241,6 @@ HTML_TEMPLATE = '''
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <style>
         :root {
-            /* Light Mode Variables */
             --bg-primary: linear-gradient(135deg, #f5f7fa 0%, #eef2f7 100%);
             --bg-secondary: rgba(255, 255, 255, 0.85);
             --card-bg: rgba(255, 255, 255, 0.75);
@@ -283,7 +292,6 @@ HTML_TEMPLATE = '''
             position: relative;
         }
 
-        /* Animated Background */
         .animated-bg {
             position: fixed;
             top: 0;
@@ -320,7 +328,6 @@ HTML_TEMPLATE = '''
             z-index: 2;
         }
 
-        /* Header with Theme Toggle */
         .header {
             display: flex;
             justify-content: space-between;
@@ -383,7 +390,6 @@ HTML_TEMPLATE = '''
             color: transparent;
         }
 
-        /* Premium Theme Toggle */
         .theme-toggle {
             position: relative;
             width: 70px;
@@ -420,7 +426,6 @@ HTML_TEMPLATE = '''
             transform: translateX(34px);
         }
 
-        /* Premium Loading Animation */
         .premium-loader {
             position: fixed;
             top: 0;
@@ -510,7 +515,6 @@ HTML_TEMPLATE = '''
             transition: width 0.3s ease;
         }
 
-        /* Main Card */
         .card {
             background: var(--card-bg);
             backdrop-filter: blur(20px);
@@ -521,7 +525,6 @@ HTML_TEMPLATE = '''
             transition: all 0.3s;
         }
 
-        /* URL Input */
         .input-group {
             margin-bottom: 25px;
         }
@@ -577,7 +580,24 @@ HTML_TEMPLATE = '''
             transform: translateY(0);
         }
 
-        /* Results Section */
+        .batch-download {
+            margin-top: 15px;
+            display: flex;
+            gap: 10px;
+            justify-content: flex-end;
+        }
+
+        .btn-secondary {
+            background: rgba(99, 102, 241, 0.2);
+            color: var(--accent-primary);
+            border: 1px solid var(--border-color);
+        }
+
+        .btn-secondary:hover {
+            background: rgba(99, 102, 241, 0.3);
+            transform: translateY(-2px);
+        }
+
         .results {
             margin-top: 40px;
             display: none;
@@ -595,7 +615,6 @@ HTML_TEMPLATE = '''
             }
         }
 
-        /* Image Section - Title BELOW Image */
         .image-section {
             margin-bottom: 40px;
         }
@@ -633,7 +652,6 @@ HTML_TEMPLATE = '''
             font-size: 0.85rem;
         }
 
-        /* Section Headers */
         .section-header {
             display: flex;
             align-items: center;
@@ -664,7 +682,6 @@ HTML_TEMPLATE = '''
             color: white;
         }
 
-        /* Media Grid */
         .media-grid {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
@@ -727,6 +744,16 @@ HTML_TEMPLATE = '''
             transform: scale(1.05);
         }
 
+        .checkbox-select {
+            margin-right: 15px;
+        }
+
+        .checkbox-select input {
+            width: 20px;
+            height: 20px;
+            cursor: pointer;
+        }
+
         .error-box {
             background: rgba(239, 68, 68, 0.15);
             border: 1px solid var(--error);
@@ -768,7 +795,6 @@ HTML_TEMPLATE = '''
             border-top: 1px solid var(--border-color);
         }
 
-        /* Toast Notification */
         .toast {
             position: fixed;
             bottom: 30px;
@@ -816,7 +842,6 @@ HTML_TEMPLATE = '''
     <div class="orb" style="width: 300px; height: 300px; background: #ec489a; top: 50%; left: 50%; animation-delay: 4s;"></div>
 </div>
 
-<!-- Premium Loader -->
 <div class="premium-loader" id="premiumLoader">
     <div class="loader-container">
         <div class="loader-ring-premium"></div>
@@ -856,18 +881,25 @@ HTML_TEMPLATE = '''
                     <i class="fas fa-magic"></i> Extract Media
                 </button>
             </div>
+            <div class="batch-download">
+                <button class="btn btn-secondary" id="batchDownloadBtn" style="display: none;">
+                    <i class="fas fa-download"></i> Download Selected (0)
+                </button>
+            </div>
         </div>
 
         <div id="resultsArea"></div>
     </div>
 
     <div class="footer">
-        <i class="fas fa-shield-alt"></i> Premium Security • All Media Types • Instant Downloads
+        <i class="fas fa-shield-alt"></i> Premium Security • Multi-API Fallback • Instant Downloads
     </div>
 </div>
 
 <script>
-    // Theme Management
+    let currentMediaData = null;
+    let selectedItems = new Set();
+    
     const themeToggle = document.getElementById('themeToggle');
     const themeIcon = document.getElementById('themeIcon');
     
@@ -891,7 +923,6 @@ HTML_TEMPLATE = '''
         }
     }
     
-    // Load saved theme
     const savedTheme = localStorage.getItem('theme');
     if (savedTheme === 'dark') {
         setTheme('dark');
@@ -901,16 +932,15 @@ HTML_TEMPLATE = '''
     
     themeToggle.addEventListener('click', toggleTheme);
     
-    // DOM Elements
     const videoUrlInput = document.getElementById('videoUrl');
     const extractBtn = document.getElementById('extractBtn');
+    const batchDownloadBtn = document.getElementById('batchDownloadBtn');
     const premiumLoader = document.getElementById('premiumLoader');
     const loaderText = document.getElementById('loaderText');
     const loaderProgress = document.getElementById('loaderProgress');
     const loaderStatus = document.getElementById('loaderStatus');
     const resultsArea = document.getElementById('resultsArea');
     
-    // Toast notification
     function showToast(message, type = 'error') {
         const toast = document.createElement('div');
         toast.className = 'toast';
@@ -933,7 +963,6 @@ HTML_TEMPLATE = '''
         updateLoaderProgress(0, 'INITIALIZING', 'Starting extraction engine...');
         premiumLoader.style.display = 'flex';
         
-        // Animate progress
         let progress = 0;
         const interval = setInterval(() => {
             if (progress < 90) {
@@ -975,6 +1004,40 @@ HTML_TEMPLATE = '''
         showToast('Download started!', 'success');
     }
     
+    function toggleSelection(itemId, url, filename) {
+        if (selectedItems.has(itemId)) {
+            selectedItems.delete(itemId);
+        } else {
+            selectedItems.add({id: itemId, url: url, filename: filename});
+        }
+        updateBatchButton();
+    }
+    
+    function updateBatchButton() {
+        const count = selectedItems.size;
+        if (count > 0) {
+            batchDownloadBtn.style.display = 'inline-flex';
+            batchDownloadBtn.innerHTML = `<i class="fas fa-download"></i> Download Selected (${count})`;
+        } else {
+            batchDownloadBtn.style.display = 'none';
+        }
+    }
+    
+    function downloadBatch() {
+        if (selectedItems.size === 0) return;
+        
+        showToast(`Downloading ${selectedItems.size} items...`, 'success');
+        selectedItems.forEach(item => {
+            setTimeout(() => {
+                downloadMedia(item.url, item.filename);
+            }, 500);
+        });
+        
+        selectedItems.clear();
+        updateBatchButton();
+        renderResults(currentMediaData); // Re-render to clear checkboxes
+    }
+    
     async function extractMedia() {
         const url = videoUrlInput.value.trim();
         if (!url) {
@@ -1006,8 +1069,11 @@ HTML_TEMPLATE = '''
             updateLoaderProgress(80, 'RENDERING', 'Building media gallery...');
             
             if (!response.ok || !data.success) {
-                throw new Error(data.error || 'Failed to extract media');
+                throw new Error(data.error || data.details || 'Failed to extract media');
             }
+            
+            currentMediaData = data;
+            selectedItems.clear();
             
             updateLoaderProgress(100, 'COMPLETE', 'Ready!');
             setTimeout(() => {
@@ -1035,11 +1101,9 @@ HTML_TEMPLATE = '''
         const images = data.images || [];
         const videos = data.videos || [];
         const audio = data.audio || [];
-        const thumbnail = data.thumbnail;
         
         let html = `<div class="results" style="display: block;">`;
         
-        // IMAGE SECTION with TITLE BELOW
         html += `<div class="image-section">`;
         if (images.length > 0 && images[0].url) {
             html += `
@@ -1066,7 +1130,6 @@ HTML_TEMPLATE = '''
         }
         html += `</div>`;
         
-        // VIDEOS SECTION
         if (videos.length > 0) {
             html += `
                 <div class="section-header">
@@ -1077,11 +1140,12 @@ HTML_TEMPLATE = '''
                 <div class="media-grid">
             `;
             
-            videos.forEach(video => {
+            videos.forEach((video, index) => {
                 const quality = video.quality || 'Standard';
                 const ext = video.ext || 'mp4';
                 const size = video.size;
                 const sizeStr = formatBytes(size);
+                const itemId = `video_${index}`;
                 
                 let qualityIcon = 'fa-video';
                 if (quality.includes('1080')) qualityIcon = 'fa-4k';
@@ -1090,6 +1154,9 @@ HTML_TEMPLATE = '''
                 
                 html += `
                     <div class="media-card">
+                        <div class="checkbox-select">
+                            <input type="checkbox" onchange="toggleSelection('${itemId}', '${escapeHtml(video.url)}', '${escapeHtml(title)}_${quality}.${ext}')">
+                        </div>
                         <div class="media-info">
                             <div class="media-quality">
                                 <i class="fas ${qualityIcon}"></i>
@@ -1110,7 +1177,6 @@ HTML_TEMPLATE = '''
             html += `</div>`;
         }
         
-        // AUDIO SECTION
         if (audio.length > 0) {
             html += `
                 <div class="section-header">
@@ -1121,14 +1187,18 @@ HTML_TEMPLATE = '''
                 <div class="media-grid">
             `;
             
-            audio.forEach(track => {
+            audio.forEach((track, index) => {
                 const quality = track.quality || 'Audio';
                 const ext = track.ext || 'mp3';
                 const size = track.size;
                 const sizeStr = formatBytes(size);
+                const itemId = `audio_${index}`;
                 
                 html += `
                     <div class="media-card">
+                        <div class="checkbox-select">
+                            <input type="checkbox" onchange="toggleSelection('${itemId}', '${escapeHtml(track.url)}', '${escapeHtml(title)}_audio.${ext}')">
+                        </div>
                         <div class="media-info">
                             <div class="media-quality">
                                 <i class="fas fa-headphones"></i>
@@ -1149,7 +1219,6 @@ HTML_TEMPLATE = '''
             html += `</div>`;
         }
         
-        // No media found
         if (videos.length === 0 && audio.length === 0) {
             html += `
                 <div class="warning-box">
@@ -1161,6 +1230,7 @@ HTML_TEMPLATE = '''
         
         html += `</div>`;
         resultsArea.innerHTML = html;
+        updateBatchButton();
     }
     
     function escapeHtml(text) {
@@ -1171,11 +1241,11 @@ HTML_TEMPLATE = '''
     }
     
     extractBtn.addEventListener('click', extractMedia);
+    batchDownloadBtn.addEventListener('click', downloadBatch);
     videoUrlInput.addEventListener('keypress', (e) => {
         if (e.key === 'Enter') extractMedia();
     });
     
-    // Auto extract on load
     setTimeout(() => extractMedia(), 500);
 </script>
 </body>
@@ -1209,7 +1279,7 @@ def health_check():
     return jsonify({
         'status': 'healthy',
         'timestamp': datetime.now().isoformat(),
-        'version': '2.0.0'
+        'version': '3.0.0'
     })
 
 if __name__ == '__main__':
@@ -1217,14 +1287,15 @@ if __name__ == '__main__':
     ╔══════════════════════════════════════════════════════════════════╗
     ║                                                                  ║
     ║           NEXEO PREMIUM - ULTIMATE MEDIA DOWNLOADER              ║
-    ║                         Version 2.0.0                            ║
+    ║                         Version 3.0.0                            ║
     ║                                                                  ║
     ║     🖼️  Images at Top | 📝 Title Below | 🎬 Videos | 🎵 Audio   ║
     ║                                                                  ║
     ║     🌓 Dark/Light Mode Toggle (Click the sun/moon icon)          ║
     ║     🚀 Premium 4-Ring Loading Animation                         ║
     ║     💎 Ultra Advanced UI/UX Design                              ║
-    ║     🔄 Auto Retry with 3 attempts on failure                    ║
+    ║     🔄 Multi-API Fallback (3 endpoints)                         ║
+    ║     📦 Batch Download with Checkbox Selection                   ║
     ║     🔔 Toast Notifications for user feedback                    ║
     ║                                                                  ║
     ║     🔗 Server: http://127.0.0.1:5000                            ║
