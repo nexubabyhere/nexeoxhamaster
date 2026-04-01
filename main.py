@@ -2,6 +2,7 @@
 """
 NEXEO PREMIUM - Ultimate Media Downloader with Dark/Light Mode
 Advanced UI/UX with premium loading animations
+Deployment ready for Vercel
 Run: python nexeo.py
 """
 
@@ -11,155 +12,211 @@ import uuid
 import time
 import logging
 import re
+import os
 from flask import Flask, render_template_string, request, jsonify
 from datetime import datetime
+from functools import wraps
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'nexeo-premium-2026'
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'nexeo-premium-2026')
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# API Configuration
+# API Configuration - Use environment variable for security
 API_URL = "https://api.easydownloader.app/api-extract/"
-API_KEY = "177p96593i9x5ase4.eivdoidjvsioiui-hNn?_oreesae&_eimrfra&_apinln"
+API_KEY = os.environ.get('EASY_DOWNLOADER_API_KEY', '177p96593i9x5ase4.eivdoidjvsioiui-hNn?_oreesae&_eimrfra&_apinln')
 
 HEADERS = {
-    'User-Agent': "Mozilla/5.0 (Linux; Android 15; 23076RN4BI Build/AQ3A.240912.001) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.119 Mobile Safari/537.36",
-    'Accept': "application/json, text/plain, */*",
-    'Accept-Encoding': "gzip, deflate, br, zstd",
-    'Content-Type': "application/json",
-    'sec-ch-ua-platform': "\"Android\"",
-    'sec-ch-ua': "\"Chromium\";v=\"146\", \"Not-A.Brand\";v=\"24\", \"Android WebView\";v=\"146\"",
-    'sec-ch-ua-mobile': "?1",
-    'origin': "https://easydownloader.app",
-    'x-requested-with': "mark.via.gp",
-    'sec-fetch-site': "same-site",
-    'sec-fetch-mode': "cors",
-    'sec-fetch-dest': "empty",
-    'accept-language': "en-IN,en-US;q=0.9,en;q=0.8",
-    'priority': "u=1, i"
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36',
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Content-Type': 'application/json',
+    'Origin': 'https://easydownloader.app',
+    'Referer': 'https://easydownloader.app/',
+    'Sec-Ch-Ua': '"Chromium";v="146", "Not-A.Brand";v="24"',
+    'Sec-Ch-Ua-Mobile': '?0',
+    'Sec-Ch-Ua-Platform': '"Windows"',
+    'Sec-Fetch-Dest': 'empty',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Site': 'same-site',
 }
 
 def extract_all_media(video_url, pagination=False):
-    """Extract all media types: images, videos, audio from the API response"""
+    """Extract all media types with robust error handling"""
     payload = {
         "video_url": video_url,
         "pagination": pagination,
         "key": API_KEY
     }
     
-    try:
-        logger.info(f"Extracting media from: {video_url[:80]}...")
-        response = requests.post(API_URL, json=payload, headers=HEADERS, timeout=45)
-        
-        if response.status_code == 200:
-            data = response.json()
+    # Retry logic for Vercel
+    max_retries = 3
+    retry_delay = 2
+    
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"Extracting media from: {video_url[:80]}... (Attempt {attempt + 1})")
             
-            if data.get('status') == 'success':
-                images = []
-                videos = []
-                audio = []
-                video_title = "Media"
-                thumbnail = None
-                duration = None
+            response = requests.post(API_URL, json=payload, headers=HEADERS, timeout=45)
+            
+            # Log response details for debugging
+            logger.info(f"Status Code: {response.status_code}")
+            logger.info(f"Response Headers: {dict(response.headers)}")
+            
+            # Check for HTTP errors
+            if response.status_code != 200:
+                error_msg = f"HTTP {response.status_code}"
+                try:
+                    error_data = response.json()
+                    error_msg += f": {error_data.get('msg', error_data.get('error', response.text[:200]))}"
+                except:
+                    error_msg += f": {response.text[:200]}"
                 
-                if 'final_urls' in data and data['final_urls']:
-                    video_data = data['final_urls'][0]
-                    video_title = video_data.get('title', 'Media')
-                    thumbnail = video_data.get('thumb')
-                    
-                    # Try to extract duration if available
-                    if 'duration' in video_data:
-                        duration = video_data.get('duration')
-                    
-                    if thumbnail:
-                        images.append({
-                            'type': 'thumbnail',
-                            'url': thumbnail,
-                            'quality': 'HD Thumbnail',
-                            'size': None,
-                            'ext': 'webp'
-                        })
-                    
-                    if 'links' in video_data:
-                        for link in video_data['links']:
-                            link_url = link.get('link_url')
-                            file_quality = link.get('file_quality', 'Unknown')
-                            file_type = link.get('file_type', 'mp4')
-                            file_group = link.get('file_quality_group', 'video')
-                            file_size = link.get('file_size')
+                if attempt < max_retries - 1:
+                    logger.warning(f"Attempt {attempt + 1} failed: {error_msg}. Retrying...")
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    return {'success': False, 'error': error_msg}
+            
+            # Parse JSON response
+            try:
+                data = response.json()
+            except json.JSONDecodeError as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"JSON decode error on attempt {attempt + 1}: {e}")
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    return {
+                        'success': False,
+                        'error': f'Invalid JSON response from API. Response: {response.text[:200]}'
+                    }
+            
+            # Check API status
+            if data.get('status') != 'success':
+                error_msg = data.get('msg', data.get('error', 'API returned error status'))
+                return {'success': False, 'error': error_msg}
+            
+            # Process successful response
+            images = []
+            videos = []
+            audio = []
+            video_title = "Media"
+            thumbnail = None
+            duration = None
+            
+            if 'final_urls' in data and data['final_urls']:
+                video_data = data['final_urls'][0]
+                video_title = video_data.get('title', 'Media')
+                thumbnail = video_data.get('thumb')
+                
+                # Try to extract duration if available
+                if 'duration' in video_data:
+                    duration = video_data.get('duration')
+                
+                if thumbnail:
+                    images.append({
+                        'type': 'thumbnail',
+                        'url': thumbnail,
+                        'quality': 'HD Thumbnail',
+                        'size': None,
+                        'ext': 'webp'
+                    })
+                
+                if 'links' in video_data:
+                    for link in video_data['links']:
+                        link_url = link.get('link_url')
+                        file_quality = link.get('file_quality', 'Unknown')
+                        file_type = link.get('file_type', 'mp4')
+                        file_group = link.get('file_quality_group', 'video')
+                        file_size = link.get('file_size')
+                        
+                        if link_url:
+                            media_item = {
+                                'quality': file_quality,
+                                'url': link_url,
+                                'size': file_size,
+                                'ext': file_type,
+                                'group': file_group
+                            }
                             
-                            if link_url:
-                                media_item = {
-                                    'quality': file_quality,
-                                    'url': link_url,
-                                    'size': file_size,
-                                    'ext': file_type,
-                                    'group': file_group
-                                }
-                                
-                                if file_group == 'video':
-                                    videos.append(media_item)
-                                elif file_group == 'audio':
-                                    audio.append(media_item)
-                                else:
-                                    videos.append(media_item)
-                
-                # Remove duplicates
-                unique_videos = []
-                seen_urls = set()
-                for vid in videos:
-                    if vid['url'] not in seen_urls:
-                        seen_urls.add(vid['url'])
-                        unique_videos.append(vid)
-                
-                # Sort videos by quality
-                def get_quality_number(q):
-                    if '720' in q or '1280x720' in q:
-                        return 720
-                    elif '480' in q or '854x480' in q:
-                        return 480
-                    elif '240' in q or '426x240' in q:
-                        return 240
-                    elif '144' in q or '256x144' in q:
-                        return 144
-                    return 0
-                
-                unique_videos.sort(key=lambda x: get_quality_number(x['quality']), reverse=True)
-                audio.sort(key=lambda x: x['quality'])
-                
-                return {
-                    'success': True,
-                    'title': video_title,
-                    'thumbnail': thumbnail,
-                    'duration': duration,
-                    'images': images,
-                    'videos': unique_videos,
-                    'audio': audio,
-                    'total_videos': len(unique_videos),
-                    'total_audio': len(audio),
-                    'timestamp': datetime.now().isoformat()
-                }
-            else:
-                return {
-                    'success': False,
-                    'error': data.get('msg', 'API returned error status')
-                }
-        else:
+                            if file_group == 'video':
+                                videos.append(media_item)
+                            elif file_group == 'audio':
+                                audio.append(media_item)
+                            else:
+                                videos.append(media_item)
+            
+            # Remove duplicates
+            unique_videos = []
+            seen_urls = set()
+            for vid in videos:
+                if vid['url'] not in seen_urls:
+                    seen_urls.add(vid['url'])
+                    unique_videos.append(vid)
+            
+            # Sort videos by quality
+            def get_quality_number(q):
+                if '1080' in q or '1920x1080' in q:
+                    return 1080
+                elif '720' in q or '1280x720' in q:
+                    return 720
+                elif '480' in q or '854x480' in q:
+                    return 480
+                elif '360' in q or '640x360' in q:
+                    return 360
+                elif '240' in q or '426x240' in q:
+                    return 240
+                elif '144' in q or '256x144' in q:
+                    return 144
+                return 0
+            
+            unique_videos.sort(key=lambda x: get_quality_number(x['quality']), reverse=True)
+            audio.sort(key=lambda x: x['quality'])
+            
             return {
-                'success': False,
-                'error': f'HTTP Error: {response.status_code}'
+                'success': True,
+                'title': video_title,
+                'thumbnail': thumbnail,
+                'duration': duration,
+                'images': images,
+                'videos': unique_videos,
+                'audio': audio,
+                'total_videos': len(unique_videos),
+                'total_audio': len(audio),
+                'timestamp': datetime.now().isoformat()
             }
             
-    except requests.exceptions.Timeout:
-        return {'success': False, 'error': 'Request timeout. Please try again.'}
-    except requests.exceptions.ConnectionError:
-        return {'success': False, 'error': 'Connection error. Check your internet.'}
-    except Exception as e:
-        logger.error(f"Extraction error: {str(e)}")
-        return {'success': False, 'error': f'Error: {str(e)}'}
+        except requests.exceptions.Timeout:
+            if attempt < max_retries - 1:
+                logger.warning(f"Timeout on attempt {attempt + 1}. Retrying...")
+                time.sleep(retry_delay)
+                continue
+            else:
+                return {'success': False, 'error': 'Request timeout. Please try again.'}
+                
+        except requests.exceptions.ConnectionError:
+            if attempt < max_retries - 1:
+                logger.warning(f"Connection error on attempt {attempt + 1}. Retrying...")
+                time.sleep(retry_delay)
+                continue
+            else:
+                return {'success': False, 'error': 'Connection error. Check your internet.'}
+                
+        except Exception as e:
+            logger.error(f"Extraction error: {str(e)}")
+            if attempt < max_retries - 1:
+                logger.warning(f"Error on attempt {attempt + 1}. Retrying...")
+                time.sleep(retry_delay)
+                continue
+            else:
+                return {'success': False, 'error': f'Error: {str(e)}'}
+    
+    return {'success': False, 'error': 'Max retries exceeded'}
 
 # Advanced HTML Template with Dark/Light Mode
 HTML_TEMPLATE = '''
@@ -168,6 +225,7 @@ HTML_TEMPLATE = '''
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+    <meta name="description" content="NEXEO PREMIUM - Ultimate Media Downloader. Download videos, audio, and images from various platforms with premium quality.">
     <title>NEXEO PREMIUM | Ultimate Media Downloader</title>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
@@ -182,9 +240,13 @@ HTML_TEMPLATE = '''
             --border-color: rgba(0, 0, 0, 0.1);
             --accent-primary: #6366f1;
             --accent-secondary: #a855f7;
+            --accent-tertiary: #ec489a;
             --shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.15);
             --input-bg: rgba(255, 255, 255, 0.9);
             --section-bg: rgba(255, 255, 255, 0.6);
+            --success: #10b981;
+            --error: #ef4444;
+            --warning: #f59e0b;
         }
 
         body.dark {
@@ -196,16 +258,20 @@ HTML_TEMPLATE = '''
             --border-color: rgba(99, 102, 241, 0.2);
             --accent-primary: #6366f1;
             --accent-secondary: #a855f7;
+            --accent-tertiary: #ec489a;
             --shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
             --input-bg: rgba(0, 0, 0, 0.5);
             --section-bg: rgba(0, 0, 0, 0.3);
+            --success: #10b981;
+            --error: #ef4444;
+            --warning: #f59e0b;
         }
 
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
-            transition: background-color 0.3s ease, color 0.2s ease, border-color 0.3s ease;
+            transition: background-color 0.3s ease, color 0.2s ease, border-color 0.3s ease, transform 0.2s ease;
         }
 
         body {
@@ -296,7 +362,7 @@ HTML_TEMPLATE = '''
 
         .logo i {
             font-size: 40px;
-            background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+            background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary), var(--accent-tertiary));
             -webkit-background-clip: text;
             background-clip: text;
             color: transparent;
@@ -311,7 +377,7 @@ HTML_TEMPLATE = '''
         .logo h1 {
             font-size: 2.2rem;
             font-weight: 800;
-            background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+            background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary), var(--accent-tertiary));
             -webkit-background-clip: text;
             background-clip: text;
             color: transparent;
@@ -507,6 +573,10 @@ HTML_TEMPLATE = '''
             box-shadow: 0 8px 30px rgba(99, 102, 241, 0.6);
         }
 
+        .btn-primary:active {
+            transform: translateY(0);
+        }
+
         /* Results Section */
         .results {
             margin-top: 40px;
@@ -659,13 +729,35 @@ HTML_TEMPLATE = '''
 
         .error-box {
             background: rgba(239, 68, 68, 0.15);
-            border: 1px solid #ef4444;
+            border: 1px solid var(--error);
             border-radius: 20px;
             padding: 20px;
             display: flex;
             align-items: center;
             gap: 15px;
-            color: #ef4444;
+            color: var(--error);
+        }
+
+        .success-box {
+            background: rgba(16, 185, 129, 0.15);
+            border: 1px solid var(--success);
+            border-radius: 20px;
+            padding: 20px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            color: var(--success);
+        }
+
+        .warning-box {
+            background: rgba(245, 158, 11, 0.15);
+            border: 1px solid var(--warning);
+            border-radius: 20px;
+            padding: 20px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            color: var(--warning);
         }
 
         .footer {
@@ -676,6 +768,35 @@ HTML_TEMPLATE = '''
             border-top: 1px solid var(--border-color);
         }
 
+        /* Toast Notification */
+        .toast {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            background: var(--card-bg);
+            backdrop-filter: blur(20px);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 12px 20px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            z-index: 1001;
+            animation: slideInRight 0.3s ease;
+            box-shadow: var(--shadow);
+        }
+
+        @keyframes slideInRight {
+            from {
+                transform: translateX(100%);
+                opacity: 0;
+            }
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+
         @media (max-width: 768px) {
             .container { padding: 15px; }
             .card { padding: 25px; }
@@ -683,6 +804,7 @@ HTML_TEMPLATE = '''
             .logo i { font-size: 28px; }
             .media-grid { grid-template-columns: 1fr; }
             .section-header h3 { font-size: 1.2rem; }
+            .toast { bottom: 20px; right: 20px; left: 20px; }
         }
     </style>
 </head>
@@ -788,6 +910,19 @@ HTML_TEMPLATE = '''
     const loaderStatus = document.getElementById('loaderStatus');
     const resultsArea = document.getElementById('resultsArea');
     
+    // Toast notification
+    function showToast(message, type = 'error') {
+        const toast = document.createElement('div');
+        toast.className = 'toast';
+        const icon = type === 'error' ? 'fa-exclamation-circle' : (type === 'success' ? 'fa-check-circle' : 'fa-info-circle');
+        toast.innerHTML = `<i class="fas ${icon}" style="color: var(--${type})"></i><span>${message}</span>`;
+        document.body.appendChild(toast);
+        setTimeout(() => {
+            toast.style.animation = 'slideInRight 0.3s reverse';
+            setTimeout(() => toast.remove(), 300);
+        }, 3000);
+    }
+    
     function updateLoaderProgress(percent, text, status) {
         loaderProgress.style.width = percent + '%';
         if (text) loaderText.innerText = text;
@@ -837,6 +972,7 @@ HTML_TEMPLATE = '''
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
+        showToast('Download started!', 'success');
     }
     
     async function extractMedia() {
@@ -847,6 +983,7 @@ HTML_TEMPLATE = '''
                     <i class="fas fa-exclamation-triangle" style="font-size: 24px;"></i>
                     <span>Please enter a valid video URL</span>
                 </div>`;
+            showToast('Please enter a valid URL', 'error');
             return;
         }
         
@@ -876,6 +1013,7 @@ HTML_TEMPLATE = '''
             setTimeout(() => {
                 renderResults(data);
                 hideLoading();
+                showToast('Media extracted successfully!', 'success');
             }, 500);
             
         } catch (error) {
@@ -884,9 +1022,10 @@ HTML_TEMPLATE = '''
                 resultsArea.innerHTML = `
                     <div class="error-box">
                         <i class="fas fa-skull" style="font-size: 24px;"></i>
-                        <span>${error.message}</span>
+                        <span>${escapeHtml(error.message)}</span>
                     </div>`;
                 hideLoading();
+                showToast(error.message, 'error');
             }, 1000);
         }
     }
@@ -945,8 +1084,9 @@ HTML_TEMPLATE = '''
                 const sizeStr = formatBytes(size);
                 
                 let qualityIcon = 'fa-video';
-                if (quality.includes('720')) qualityIcon = 'fa-hd';
                 if (quality.includes('1080')) qualityIcon = 'fa-4k';
+                else if (quality.includes('720')) qualityIcon = 'fa-hd';
+                else if (quality.includes('480')) qualityIcon = 'fa-film';
                 
                 html += `
                     <div class="media-card">
@@ -1012,7 +1152,7 @@ HTML_TEMPLATE = '''
         // No media found
         if (videos.length === 0 && audio.length === 0) {
             html += `
-                <div class="error-box">
+                <div class="warning-box">
                     <i class="fas fa-info-circle" style="font-size: 24px;"></i>
                     <span>No downloadable media found. Try another video source.</span>
                 </div>
@@ -1063,21 +1203,33 @@ def api_extract_all():
         logger.error(f"API error: {str(e)}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint for Vercel"""
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': datetime.now().isoformat(),
+        'version': '2.0.0'
+    })
+
 if __name__ == '__main__':
     print("""
     ╔══════════════════════════════════════════════════════════════════╗
     ║                                                                  ║
     ║           NEXEO PREMIUM - ULTIMATE MEDIA DOWNLOADER              ║
+    ║                         Version 2.0.0                            ║
     ║                                                                  ║
     ║     🖼️  Images at Top | 📝 Title Below | 🎬 Videos | 🎵 Audio   ║
     ║                                                                  ║
     ║     🌓 Dark/Light Mode Toggle (Click the sun/moon icon)          ║
     ║     🚀 Premium 4-Ring Loading Animation                         ║
     ║     💎 Ultra Advanced UI/UX Design                              ║
+    ║     🔄 Auto Retry with 3 attempts on failure                    ║
+    ║     🔔 Toast Notifications for user feedback                    ║
     ║                                                                  ║
     ║     🔗 Server: http://127.0.0.1:5000                            ║
+    ║     💚 Health Check: http://127.0.0.1:5000/health               ║
     ║                                                                  ║
     ╚══════════════════════════════════════════════════════════════════╝
     """)
     app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)
-
